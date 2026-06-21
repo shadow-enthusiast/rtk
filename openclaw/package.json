@@ -1,6 +1,6 @@
 {
   "name": "@rtk-ai/rtk-rewrite",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "RTK plugin for OpenClaw — rewrites shell commands for 60-90% LLM token savings",
   "type": "module",
   "main": "index.js",

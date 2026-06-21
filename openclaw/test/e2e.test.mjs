@@ -11,6 +11,16 @@ function createFakeRtkBin() {
     bin,
     `#!/usr/bin/env node
 const [, , subcommand, command] = process.argv;
+if (subcommand === "gain") {
+  const args = process.argv.slice(3);
+  if (args.includes("--format") && args.includes("json")) {
+    console.log(JSON.stringify({ summary: { total_saved: 1234, avg_savings_pct: 76.5 }, args }));
+  } else {
+    console.log("Total saved: 1,234 tokens");
+    console.log("Args: " + args.join(" "));
+  }
+  process.exit(0);
+}
 if (subcommand !== "rewrite") process.exit(64);
 if (command === "git status") {
   console.log("rtk git status");
@@ -36,12 +46,17 @@ async function importPlugin(suffix) {
 
 function createApi(config = {}) {
   const hooks = [];
+  const commands = [];
   return {
     hooks,
+    commands,
     api: {
       config,
       on(name, handler, options) {
         hooks.push({ name, handler, options });
+      },
+      registerCommand(command) {
+        commands.push(command);
       },
     },
   };
@@ -58,8 +73,11 @@ try {
   register(registered.api);
 
   assert.equal(registered.hooks.length, 1);
+  assert.equal(registered.commands.length, 1);
   assert.equal(registered.hooks[0].name, "before_tool_call");
   assert.equal(registered.hooks[0].options.priority, 10);
+  assert.equal(registered.commands[0].name, "rtk_gain");
+  assert.equal(registered.commands[0].acceptsArgs, true);
 
   const hook = registered.hooks[0].handler;
 
@@ -85,15 +103,30 @@ try {
     params: { command: "rtk ls -la" },
   });
 
+  const gain = registered.commands[0].handler;
+  assert.match((await gain({ args: "" })).text, /Total saved: 1,234 tokens/);
+  assert.match((await gain({ args: "graph history" })).text, /Args: --graph --history/);
+  const jsonResult = await gain({ args: "all json" });
+  assert.match(jsonResult.text, /```json/);
+  assert.match(jsonResult.text, /"--all"/);
+  assert.match((await gain({ args: "quota pro" })).text, /Args: --quota --tier pro/);
+  assert.match((await gain({ args: "tier 5x" })).text, /Args: --quota --tier 5x/);
+  assert.match((await gain({ args: "-f" })).text, /Args: --failures/);
+  assert.match((await gain({ args: "reset" })).text, /Reset is intentionally not available/);
+  assert.match((await gain({ args: "help" })).text, /Usage: \/rtk_gain/);
+
   const disabled = createApi({ enabled: false });
   register(disabled.api);
   assert.equal(disabled.hooks.length, 0);
+  assert.equal(disabled.commands.length, 0);
 
   process.env.PATH = "";
   const { default: registerMissing } = await importPlugin("?missing-rtk");
   const missing = createApi();
   registerMissing(missing.api);
   assert.equal(missing.hooks.length, 0);
+  assert.equal(missing.commands.length, 1);
+  assert.match((await missing.commands[0].handler({ args: "" })).text, /RTK binary not found/);
 } finally {
   process.env.PATH = originalPath;
   rmSync(fakeBinDir, { recursive: true, force: true });

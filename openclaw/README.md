@@ -68,6 +68,24 @@ In `openclaw.json`:
 }
 ```
 
+## Telegram command
+
+The plugin also registers `/rtk_gain` as an OpenClaw runtime slash command for
+RTK Token Savings Analytics.
+
+Examples:
+
+```text
+/rtk_gain
+/rtk_gain graph history
+/rtk_gain all json
+/rtk_gain quota pro
+```
+
+The command only forwards a fixed allowlist of analytics options to `rtk gain`.
+Destructive analytics actions such as `--reset` are intentionally not available
+through the slash command.
+
 ## What gets rewritten
 
 Everything that `rtk rewrite` supports (30+ commands). See the [full command list](https://github.com/rtk-ai/rtk#commands).
