@@ -12,6 +12,10 @@ function createFakeRtkBin() {
     `#!/usr/bin/env node
 const [, , subcommand, command] = process.argv;
 if (subcommand === "gain") {
+  if (process.env.FAKE_RTK_HANG === "1") {
+    setTimeout(() => {}, 60000);
+    return;
+  }
   const args = process.argv.slice(3);
   if (args.includes("--format") && args.includes("json")) {
     console.log(JSON.stringify({ summary: { total_saved: 1234, avg_savings_pct: 76.5 }, args }));
@@ -63,10 +67,12 @@ function createApi(config = {}) {
 }
 
 const originalPath = process.env.PATH;
+const originalGainTimeout = process.env.RTK_OPENCLAW_GAIN_TIMEOUT_MS;
 const fakeBinDir = createFakeRtkBin();
 
 try {
   process.env.PATH = `${fakeBinDir}:${originalPath}`;
+  process.env.RTK_OPENCLAW_GAIN_TIMEOUT_MS = "500";
   const { default: register } = await importPlugin("?with-rtk");
 
   const registered = createApi({ verbose: true });
@@ -84,9 +90,22 @@ try {
   assert.equal(hook({ toolName: "message", params: { command: "git status" } }), undefined);
   assert.equal(hook({ toolName: "exec", params: { command: "unknown" } }), undefined);
   assert.equal(hook({ toolName: "exec", params: { command: "dangerous" } }), undefined);
+  assert.equal(hook({ toolName: "exec_command", params: { cmd: "unknown" } }), undefined);
 
   assert.deepEqual(hook({ toolName: "exec", params: { command: "git status" } }), {
     params: { command: "rtk git status" },
+  });
+
+  assert.deepEqual(hook({ toolName: "exec_command", params: { cmd: "git status" } }), {
+    params: { cmd: "rtk git status" },
+  });
+
+  assert.deepEqual(hook({ toolName: "functions.exec_command", params: { cmd: "git status", yield_time_ms: 1000 } }), {
+    params: { cmd: "rtk git status", yield_time_ms: 1000 },
+  });
+
+  assert.deepEqual(hook({ toolName: "bash", params: { cmd: "ls -la" } }), {
+    params: { cmd: "rtk ls -la" },
   });
 
   assert.deepEqual(
@@ -114,6 +133,9 @@ try {
   assert.match((await gain({ args: "-f" })).text, /Args: --failures/);
   assert.match((await gain({ args: "reset" })).text, /Reset is intentionally not available/);
   assert.match((await gain({ args: "help" })).text, /Usage: \/rtk_gain/);
+  process.env.FAKE_RTK_HANG = "1";
+  assert.match((await gain({ args: "" })).text, /Failed to read RTK Token Savings Analytics/);
+  delete process.env.FAKE_RTK_HANG;
 
   const disabled = createApi({ enabled: false });
   register(disabled.api);
@@ -129,5 +151,11 @@ try {
   assert.match((await missing.commands[0].handler({ args: "" })).text, /RTK binary not found/);
 } finally {
   process.env.PATH = originalPath;
+  if (originalGainTimeout === undefined) {
+    delete process.env.RTK_OPENCLAW_GAIN_TIMEOUT_MS;
+  } else {
+    process.env.RTK_OPENCLAW_GAIN_TIMEOUT_MS = originalGainTimeout;
+  }
+  delete process.env.FAKE_RTK_HANG;
   rmSync(fakeBinDir, { recursive: true, force: true });
 }

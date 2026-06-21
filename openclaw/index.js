@@ -9,10 +9,13 @@
  * Rust registry, not this file.
  */
 
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 
 let rtkAvailable = null;
 const TELEGRAM_TEXT_LIMIT = 3900;
+const GAIN_TIMEOUT_MS = Number.parseInt(process.env.RTK_OPENCLAW_GAIN_TIMEOUT_MS || "10000", 10);
+const execFileAsync = promisify(execFile);
 
 function checkRtk() {
   if (rtkAvailable !== null) return rtkAvailable;
@@ -51,15 +54,24 @@ function tryRewrite(command) {
   return stdout && stdout !== command ? stdout : null;
 }
 
+const SHELL_TOOL_NAMES = new Set(["exec", "exec_command", "bash", "shell", "functions.exec_command"]);
+
+function isShellToolName(toolName) {
+  return SHELL_TOOL_NAMES.has(toolName);
+}
+
 function rewriteExecParams(params) {
   if (!params || typeof params !== "object" || Array.isArray(params)) return null;
-  const command = params.command;
+  const commandKey = typeof params.command === "string" ? "command" : typeof params.cmd === "string" ? "cmd" : null;
+  if (!commandKey) return null;
+
+  const command = params[commandKey];
   if (typeof command !== "string") return null;
 
   const rewritten = tryRewrite(command);
   if (!rewritten) return null;
 
-  const nextParams = { ...params, command: rewritten };
+  const nextParams = { ...params, [commandKey]: rewritten };
   if (params.code === command) {
     nextParams.code = rewritten;
   }
@@ -197,17 +209,18 @@ function truncateText(text) {
   return `${text.slice(0, TELEGRAM_TEXT_LIMIT - 80).trimEnd()}\n\n[truncated; run rtk gain locally for full output]`;
 }
 
-function runGainCommand(rawArgs) {
+async function runGainCommand(rawArgs) {
   const parsed = parseGainArgs(rawArgs);
   if ("help" in parsed) return { text: gainHelp() };
   if ("error" in parsed) return { text: parsed.error };
 
   try {
-    const output = execFileSync("rtk", ["gain", ...parsed.args], {
+    const { stdout } = await execFileAsync("rtk", ["gain", ...parsed.args], {
       encoding: "utf-8",
-      timeout: 10000,
+      timeout: Number.isFinite(GAIN_TIMEOUT_MS) && GAIN_TIMEOUT_MS > 0 ? GAIN_TIMEOUT_MS : 10000,
       maxBuffer: 1024 * 1024,
-    }).trim();
+    });
+    const output = stdout.trim();
     const body = output || "No RTK analytics data yet.";
     return { text: truncateText(`RTK Token Savings Analytics\n\n${fenceForArgs(parsed.args, body)}`) };
   } catch (err) {
@@ -225,7 +238,10 @@ function registerGainCommand(api) {
     name: "rtk_gain",
     description: "RTK Token Savings Analytics",
     acceptsArgs: true,
-    handler: async (ctx) => runGainCommand(ctx.args || ""),
+    nativeProgressMessages: {
+      telegram: "Reading RTK Token Savings Analytics...",
+    },
+    handler: async (ctx) => await runGainCommand(ctx.args || ""),
   });
 }
 
@@ -250,7 +266,7 @@ export default function register(api) {
   api.on(
     "before_tool_call",
     (event) => {
-      if (event.toolName !== "exec") return;
+      if (!isShellToolName(event.toolName)) return;
 
       const rewrite = rewriteExecParams(event.params);
       if (!rewrite) return;

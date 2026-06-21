@@ -6,7 +6,7 @@ This is the OpenClaw equivalent of the Claude Code hooks in `hooks/rtk-rewrite.s
 
 ## How it works
 
-The plugin registers a `before_tool_call` hook that intercepts `exec` tool calls. When the agent runs a command like `git status`, the plugin delegates to `rtk rewrite` which returns the optimized command (e.g. `rtk git status`). The compressed output enters the agent's context window, saving tokens.
+The plugin registers a `before_tool_call` hook that intercepts shell tool calls (`exec`, `exec_command`, `bash`, and compatible variants). When the agent runs a command like `git status`, the plugin delegates to `rtk rewrite` which returns the optimized command (e.g. `rtk git status`). The compressed output enters the agent's context window, saving tokens.
 
 All rewrite logic lives in RTK itself (`rtk rewrite`). This plugin is a thin delegate -- when new filters are added to RTK, the plugin picks them up automatically with zero changes.
 
