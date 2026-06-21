@@ -27,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 ```bash
 # Copy the plugin to OpenClaw's extensions directory
 mkdir -p ~/.openclaw/extensions/rtk-rewrite
-cp openclaw/index.ts openclaw/openclaw.plugin.json ~/.openclaw/extensions/rtk-rewrite/
+cp openclaw/index.js openclaw/openclaw.plugin.json ~/.openclaw/extensions/rtk-rewrite/
 
 # Restart the gateway
 openclaw gateway restart
@@ -37,6 +37,15 @@ openclaw gateway restart
 
 ```bash
 openclaw plugins install ./openclaw
+```
+
+### Verify locally
+
+```bash
+cd openclaw
+npm install
+npm test
+npm run build
 ```
 
 ## Configuration
