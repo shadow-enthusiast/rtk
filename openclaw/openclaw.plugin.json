@@ -9,6 +9,9 @@
     "onStartup": true,
     "onCapabilities": ["hook"]
   },
+  "contracts": {
+    "agentToolResultMiddleware": ["openclaw"]
+  },
   "commandAliases": [
     {
       "name": "rtk_gain",

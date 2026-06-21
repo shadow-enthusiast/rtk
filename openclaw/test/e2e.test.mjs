@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -10,6 +10,7 @@ function createFakeRtkBin() {
   writeFileSync(
     bin,
     `#!/usr/bin/env node
+const fs = require("node:fs");
 const [, , subcommand, command] = process.argv;
 if (subcommand === "gain") {
   if (process.env.FAKE_RTK_HANG === "1") {
@@ -24,6 +25,30 @@ if (subcommand === "gain") {
     console.log("Args: " + args.join(" "));
   }
   process.exit(0);
+}
+if (subcommand === "read") {
+  const file = process.argv.at(-1);
+  const text = fs.readFileSync(file, "utf8");
+  if (text.includes("COMPRESS_ME")) {
+    console.log("compact read output");
+  } else {
+    process.stdout.write(text);
+  }
+  process.exit(0);
+}
+if (subcommand === "pipe") {
+  let input = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => { input += chunk; });
+  process.stdin.on("end", () => {
+    if (process.argv.includes("log")) {
+      console.log("Log Summary");
+      console.log("[error] 1 errors (1 unique)");
+    } else {
+      process.stdout.write(input);
+    }
+  });
+  return;
 }
 if (subcommand !== "rewrite") process.exit(64);
 if (command === "git status") {
@@ -51,9 +76,11 @@ async function importPlugin(suffix) {
 function createApi(config = {}) {
   const hooks = [];
   const commands = [];
+  const middlewares = [];
   return {
     hooks,
     commands,
+    middlewares,
     api: {
       config,
       on(name, handler, options) {
@@ -62,8 +89,15 @@ function createApi(config = {}) {
       registerCommand(command) {
         commands.push(command);
       },
+      registerAgentToolResultMiddleware(handler, options) {
+        middlewares.push({ handler, options });
+      },
     },
   };
+}
+
+function textResult(text) {
+  return { content: [{ type: "text", text }], details: { kept: true } };
 }
 
 const originalPath = process.env.PATH;
@@ -80,10 +114,15 @@ try {
 
   assert.equal(registered.hooks.length, 1);
   assert.equal(registered.commands.length, 1);
+  assert.equal(registered.middlewares.length, 1);
   assert.equal(registered.hooks[0].name, "before_tool_call");
   assert.equal(registered.hooks[0].options.priority, 10);
   assert.equal(registered.commands[0].name, "rtk_gain");
   assert.equal(registered.commands[0].acceptsArgs, true);
+  assert.deepEqual(registered.middlewares[0].options, { runtimes: ["openclaw"] });
+
+  const manifest = JSON.parse(readFileSync(join(import.meta.dirname, "..", "openclaw.plugin.json"), "utf8"));
+  assert.deepEqual(manifest.contracts.agentToolResultMiddleware, ["openclaw"]);
 
   const hook = registered.hooks[0].handler;
 
@@ -137,10 +176,54 @@ try {
   assert.match((await gain({ args: "" })).text, /Failed to read RTK Token Savings Analytics/);
   delete process.env.FAKE_RTK_HANG;
 
+  const middleware = registered.middlewares[0].handler;
+  const readFile = join(fakeBinDir, "large.txt");
+  writeFileSync(readFile, `${"COMPRESS_ME\n".repeat(1300)}`);
+  const readOriginal = textResult(readFileSync(readFile, "utf8"));
+  const compactRead = await middleware({
+    toolName: "read",
+    args: { path: readFile },
+    result: readOriginal,
+  });
+  assert.match(compactRead.result.content[0].text, /rtk compacted read result via rtk read/);
+  assert.match(compactRead.result.content[0].text, /compact read output/);
+  assert.deepEqual(compactRead.result.details, { kept: true });
+
+  const offsetRead = await middleware({
+    toolName: "read",
+    args: { path: readFile, offset: 100 },
+    result: readOriginal,
+  });
+  assert.equal(offsetRead, undefined);
+
+  const smallRead = await middleware({
+    toolName: "read",
+    args: { path: readFile },
+    result: textResult("short output"),
+  });
+  assert.equal(smallRead, undefined);
+
+  const logText = `${"INFO repeated line\n".repeat(1300)}ERROR boom\n`;
+  const compactLog = await middleware({
+    toolName: "process",
+    args: { action: "log", sessionId: "abc" },
+    result: textResult(logText),
+  });
+  assert.match(compactLog.result.content[0].text, /rtk compacted process\.log result via rtk log/);
+  assert.match(compactLog.result.content[0].text, /Log Summary/);
+
+  const imageResult = await middleware({
+    toolName: "read",
+    args: { path: readFile },
+    result: { content: [{ type: "image", image: "data" }], details: {} },
+  });
+  assert.equal(imageResult, undefined);
+
   const disabled = createApi({ enabled: false });
   register(disabled.api);
   assert.equal(disabled.hooks.length, 0);
   assert.equal(disabled.commands.length, 0);
+  assert.equal(disabled.middlewares.length, 0);
 
   process.env.PATH = "";
   const { default: registerMissing } = await importPlugin("?missing-rtk");
@@ -148,6 +231,7 @@ try {
   registerMissing(missing.api);
   assert.equal(missing.hooks.length, 0);
   assert.equal(missing.commands.length, 1);
+  assert.equal(missing.middlewares.length, 0);
   assert.match((await missing.commands[0].handler({ args: "" })).text, /RTK binary not found/);
 } finally {
   process.env.PATH = originalPath;

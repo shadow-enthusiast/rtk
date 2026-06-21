@@ -8,6 +8,8 @@ This is the OpenClaw equivalent of the Claude Code hooks in `hooks/rtk-rewrite.s
 
 The plugin registers a `before_tool_call` hook that intercepts shell tool calls (`exec`, `exec_command`, `bash`, and compatible variants). When the agent runs a command like `git status`, the plugin delegates to `rtk rewrite` which returns the optimized command (e.g. `rtk git status`). The compressed output enters the agent's context window, saving tokens.
 
+It also registers OpenClaw tool-result middleware for large `read` and `process` log results. That path runs after the tool executes but before OpenClaw feeds the tool output back into the model. The middleware is intentionally conservative: it only touches text-only, non-error results above a size threshold and keeps the original output when RTK does not save enough tokens.
+
 All rewrite logic lives in RTK itself (`rtk rewrite`). This plugin is a thin delegate -- when new filters are added to RTK, the plugin picks them up automatically with zero changes.
 
 ## Installation
@@ -89,6 +91,30 @@ through the slash command.
 ## What gets rewritten
 
 Everything that `rtk rewrite` supports (30+ commands). See the [full command list](https://github.com/rtk-ai/rtk#commands).
+
+## Tool-result compaction
+
+Large non-shell tool outputs can also be compacted:
+
+- `read` results: rerendered with `rtk read --level minimal` when the read has no `offset`/`limit` slicing.
+- `process` results: large `process.log` and `process.poll` text output is filtered through `rtk pipe --filter log`.
+
+Safety guards:
+
+- text-only results only; images and structured media are left alone
+- tool errors are left alone
+- small outputs are left alone
+- sliced `read` calls (`offset`/`limit`) are left alone so the middleware does not accidentally reread different content
+- compacted output must beat the original by at least 15% after the provenance header is added
+
+Environment overrides:
+
+```bash
+RTK_OPENCLAW_RESULT_MIN_CHARS=12000
+RTK_OPENCLAW_RESULT_MIN_SAVINGS_PCT=15
+RTK_OPENCLAW_RESULT_TIMEOUT_MS=3000
+RTK_OPENCLAW_READ_LEVEL=minimal
+```
 
 ## What's NOT rewritten
 

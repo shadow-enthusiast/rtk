@@ -9,12 +9,16 @@
  * Rust registry, not this file.
  */
 
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
 let rtkAvailable = null;
 const TELEGRAM_TEXT_LIMIT = 3900;
 const GAIN_TIMEOUT_MS = Number.parseInt(process.env.RTK_OPENCLAW_GAIN_TIMEOUT_MS || "10000", 10);
+const RESULT_TIMEOUT_MS = Number.parseInt(process.env.RTK_OPENCLAW_RESULT_TIMEOUT_MS || "3000", 10);
+const RESULT_MIN_CHARS = Number.parseInt(process.env.RTK_OPENCLAW_RESULT_MIN_CHARS || "12000", 10);
+const RESULT_MIN_SAVINGS_PCT = Number.parseInt(process.env.RTK_OPENCLAW_RESULT_MIN_SAVINGS_PCT || "15", 10);
+const READ_LEVEL = process.env.RTK_OPENCLAW_READ_LEVEL || "minimal";
 const execFileAsync = promisify(execFile);
 
 function checkRtk() {
@@ -76,6 +80,143 @@ function rewriteExecParams(params) {
     nextParams.code = rewritten;
   }
   return { command, rewritten, params: nextParams };
+}
+
+function finitePositive(value, fallback) {
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function getTextBlocks(result) {
+  if (!Array.isArray(result.content)) return null;
+  const blocks = result.content;
+  if (blocks.length === 0) return null;
+  const textBlocks = [];
+  for (const block of blocks) {
+    if (!block || typeof block !== "object") return null;
+    if (block.type !== "text" || typeof block.text !== "string") return null;
+    textBlocks.push(block);
+  }
+  return textBlocks;
+}
+
+function countLines(text) {
+  if (text.length === 0) return 0;
+  return text.split("\n").length;
+}
+
+function shouldAttemptResultCompression(text) {
+  return text.length >= finitePositive(RESULT_MIN_CHARS, 12000);
+}
+
+function withCompactedText(result, blocks, text) {
+  if (blocks.length === 1) {
+    return { ...result, content: [{ ...blocks[0], text }] };
+  }
+  return { ...result, content: [{ type: "text", text }] };
+}
+
+function maybeAcceptCompaction(original, compacted, label) {
+  const trimmed = compacted.trim();
+  if (!trimmed || trimmed === original.trim()) return null;
+
+  const originalChars = original.length;
+  const compactedChars = trimmed.length;
+  const minSavingsPct = Math.max(0, Math.min(95, finitePositive(RESULT_MIN_SAVINGS_PCT, 15)));
+  const maxAllowed = Math.floor(originalChars * (1 - minSavingsPct / 100));
+  const header = `[rtk compacted ${label}: ${originalChars.toLocaleString()} chars / ${countLines(original).toLocaleString()} lines -> ${compactedChars.toLocaleString()} chars]\n`;
+
+  if (header.length + compactedChars > maxAllowed) return null;
+  return `${header}${trimmed}`;
+}
+
+async function runRtk(args, input) {
+  if (input === undefined) {
+    const { stdout } = await execFileAsync("rtk", args, {
+      encoding: "utf-8",
+      timeout: finitePositive(RESULT_TIMEOUT_MS, 3000),
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    return stdout.toString();
+  }
+
+  return await new Promise((resolve, reject) => {
+    const child = spawn("rtk", args, { stdio: ["pipe", "pipe", "pipe"] });
+    const chunks = [];
+    const errorChunks = [];
+    let settled = false;
+
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGTERM");
+      reject(new Error(`rtk ${args.join(" ")} timed out`));
+    }, finitePositive(RESULT_TIMEOUT_MS, 3000));
+
+    child.stdout.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    child.stderr.on("data", (chunk) => errorChunks.push(Buffer.from(chunk)));
+    child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(err);
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (code === 0) {
+        resolve(Buffer.concat(chunks).toString("utf-8"));
+        return;
+      }
+      const stderr = Buffer.concat(errorChunks).toString("utf-8").trim();
+      reject(new Error(stderr || `rtk ${args.join(" ")} exited with code ${code}`));
+    });
+    child.stdin.end(input);
+  });
+}
+
+function isPlainRead(event) {
+  const args = event.args || {};
+  return (
+    typeof args.path === "string" &&
+    args.path.length > 0 &&
+    args.offset === undefined &&
+    args.limit === undefined
+  );
+}
+
+async function compactReadResult(event, original) {
+  if (!isPlainRead(event)) return null;
+  const args = event.args || {};
+  const output = await runRtk(["read", "--level", READ_LEVEL, String(args.path)]);
+  return maybeAcceptCompaction(original, output, "read result via rtk read");
+}
+
+async function compactProcessResult(event, original) {
+  const action = event.args?.action;
+  if (action !== "log" && action !== "poll") return null;
+  const output = await runRtk(["pipe", "--filter", "log"], original);
+  return maybeAcceptCompaction(original, output, `process.${String(action)} result via rtk log`);
+}
+
+async function compactToolResult(event) {
+  if (event.isError) return;
+
+  const blocks = getTextBlocks(event.result);
+  if (!blocks) return;
+
+  const original = blocks.map((block) => block.text).join("\n");
+  if (!shouldAttemptResultCompression(original)) return;
+
+  let compacted = null;
+  if (event.toolName === "read") {
+    compacted = await compactReadResult(event, original);
+  } else if (event.toolName === "process") {
+    compacted = await compactProcessResult(event, original);
+  }
+
+  if (!compacted) return;
+  return { result: withCompactedText(event.result, blocks, compacted) };
 }
 
 function gainHelp() {
@@ -261,6 +402,20 @@ export default function register(api) {
   if (!checkRtk()) {
     console.warn("[rtk] rtk binary not found in PATH -- plugin disabled");
     return;
+  }
+
+  if (typeof api.registerAgentToolResultMiddleware === "function") {
+    api.registerAgentToolResultMiddleware(
+      async (event) => {
+        try {
+          return await compactToolResult(event);
+        } catch (err) {
+          if (verbose) console.warn(`[rtk] tool result compaction skipped: ${String(err)}`);
+          return;
+        }
+      },
+      { runtimes: ["openclaw"] }
+    );
   }
 
   api.on(
